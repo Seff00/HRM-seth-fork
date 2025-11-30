@@ -4,11 +4,32 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-try:
-    from flash_attn_interface import flash_attn_func  # type: ignore[import]
-except ImportError:
-    # Fallback to FlashAttention 2
-    from flash_attn import flash_attn_func  # type: ignore[import]
+# try:
+#     from flash_attn_interface import flash_attn_func  # type: ignore[import]
+# except ImportError:
+#     # Fallback to FlashAttention 2
+#     from flash_attn import flash_attn_func  # type: ignore[import]
+
+def flash_attn_func(q, k, v, dropout_p=0.0, softmax_scale=None, causal=False, window_size=(-1, -1), alibi_slopes=None, deterministic=False, return_attn_probs=False):
+    # q, k, v: [bs, seq_len, num_heads, head_dim]
+    # SDPA expects: [bs, num_heads, seq_len, head_dim]
+    
+    q = q.transpose(1, 2)
+    k = k.transpose(1, 2)
+    v = v.transpose(1, 2)
+    
+    # Handle GQA: if num_heads (dim 1) doesn't match, repeat k/v
+    if k.shape[1] != q.shape[1]:
+        n_rep = q.shape[1] // k.shape[1]
+        k = k.repeat_interleave(n_rep, dim=1)
+        v = v.repeat_interleave(n_rep, dim=1)
+        
+    out = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=dropout_p, is_causal=causal)
+    
+    # Output needs to be [bs, seq_len, num_heads, head_dim] to match flash_attn
+    out = out.transpose(1, 2)
+    
+    return out
 
 from models.common import trunc_normal_init_
 
