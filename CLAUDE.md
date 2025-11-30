@@ -185,6 +185,65 @@ self.puzzle_emb = CastedSparseEmbedding(
 - Puzzle identifiers are saved to map back to original names
 - Training uses augmentation (1000 variants per puzzle with color permutations + dihedral transforms)
 
+### 7. Puzzle Embedding Architecture Discrepancy ⚠️
+
+**CRITICAL FINDING**: The implementation of puzzle embeddings differs from the paper's description.
+
+#### What the Paper Says (Page 12)
+
+> "Each task example is prepended with a learnable special token that represents the puzzle it belongs to."
+
+This wording suggests the puzzle ID token is **prepended to the input sequence BEFORE embedding**, implying a single embedding layer would handle both puzzle IDs and grid tokens.
+
+#### What the Code Actually Does
+
+The code uses **two separate embedding layers**:
+
+1. **Grid token embedding** (`hrm_act_v1.py:112`):
+   ```python
+   self.embed_tokens = CastedEmbedding(
+       self.config.vocab_size,
+       self.config.hidden_size,
+       ...
+   )
+   ```
+
+2. **Puzzle ID embedding** (`hrm_act_v1.py:119-120`):
+   ```python
+   self.puzzle_emb = CastedSparseEmbedding(
+       self.config.num_puzzle_identifiers,
+       self.config.puzzle_emb_ndim,
+       batch_size=batch_size,
+       init_std=0,
+       cast_to=forward_dtype
+   )
+   ```
+
+#### The Concatenation Process (`_input_embeddings` method, lines 146-166)
+
+```python
+# Step 1: Embed grid tokens
+embedding = self.embed_tokens(input.to(torch.int32))  # Line 148
+
+# Step 2: Embed puzzle ID separately
+puzzle_embedding = self.puzzle_emb(puzzle_identifiers)  # Line 152
+
+# Step 3: Concatenate AFTER both are embedded
+embedding = torch.cat((
+    puzzle_embedding.view(-1, self.puzzle_emb_len, self.config.hidden_size),
+    embedding  # grid token embeddings
+), dim=-2)  # Line 158
+```
+
+#### Implication
+
+The puzzle ID is **embedded separately, then prepended** to the already-embedded grid tokens. This is a meaningful architectural difference:
+
+- **Paper description**: Prepend token ID → Single embedding layer
+- **Code implementation**: Two separate embeddings → Concatenate embeddings
+
+This two-embedding approach allows the puzzle ID to have its own learned embedding space separate from the grid token vocabulary, which may provide more flexibility in learning puzzle-specific representations.
+
 ## Training Details
 
 ### Key Hyperparameters (`config/cfg_pretrain.yaml`)
@@ -331,6 +390,7 @@ This emergent property arises during training and correlates with the model's ab
 - **Test-time optimization gap**: Code doesn't implement the paper's described test-time learning
 - Model generalizes using only **pre-trained knowledge** without adapting to demonstration pairs at test time
 - This is actually a **stronger result**: shows the model can reason without test-time optimization
+- **Puzzle embedding architecture**: Uses two separate embedding layers (one for puzzle IDs, one for grid tokens) that are concatenated, rather than a single embedding layer as the paper's wording suggests
 
 ## References
 
