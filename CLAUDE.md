@@ -302,36 +302,60 @@ def evaluate(...):
 
 ### How Demonstration Pairs Are Used
 
-The code **does NOT ignore** demonstration pairs, but uses them differently:
+**CRITICAL**: The code **completely ignores** demonstration pairs during evaluation.
 
-**Dataset structure** (`build_arc_dataset.py:98-107`):
-- All examples (demonstrations + tests) for a puzzle share the same `puzzle_identifier`
-- Both are serialized into the evaluation dataset together
+**Dataset creation** (`build_arc_dataset.py:148-178`):
+```python
+# Demonstration and test pairs are separated into different splits
+train_examples_dest = ("train", "all")  # Demo pairs → "train" split
+test_examples_map = {
+    "evaluation": [(1.0, ("test", "all"))],  # Test pairs → "test" split
+}
 
-**During evaluation**:
-- All examples (demos + tests) are run through inference with the **frozen pre-trained model**
-- Demonstration pairs are treated identically to test pairs
-- Both get predictions + accuracy metrics computed
-- The model relies entirely on the puzzle embedding learned during pre-training
+dest_mapping = {
+    "train": train_examples_dest,   # ARC "train" examples → training dataset
+    "test": test_examples_dest      # ARC "test" examples → test dataset
+}
+```
+
+**During evaluation** (`evaluate.py:42`):
+```python
+# Only loads the "test" split - demonstration pairs are never loaded
+eval_loader, eval_metadata = create_dataloader(
+    config,
+    "test",  # ← Only test pairs, NOT demonstrations
+    test_set_mode=True,
+    ...
+)
+```
+
+**What actually happens at test time**:
+1. Model loads only test input-output pairs (no demonstration pairs)
+2. Each test pair has 1000 augmented variants in the dataset
+3. Pure inference runs on all variants with frozen weights
+4. Predictions go through inverse augmentation + majority voting (`arc_eval.ipynb`)
 
 ### Comparison Table
 
 | Aspect | Paper Description | Code Implementation |
 |--------|------------------|---------------------|
-| Demo pairs usage | Optimize puzzle embedding (test-time learning) | Run inference + evaluate accuracy |
-| Test pairs usage | Freeze embedding, run inference | Run inference + evaluate accuracy |
+| Demo pairs at test time | Optimize puzzle embedding (gradient descent) | **Never loaded or used** |
+| Test pairs usage | Freeze embedding, run inference | Run inference on 1000 augmented variants |
 | Gradient computation | Yes (for demo pairs) | No (`torch.inference_mode()`) |
-| Process | Two-stage (adapt → infer) | Single-stage (pure inference) |
+| Process | Two-stage (adapt on demos → infer on tests) | Single-stage (pure inference on tests only) |
 | Augmentation + voting | ✅ Described (1000 variants) | ✅ Implemented (`arc_eval.ipynb`) |
+| Puzzle embedding source | Test-time optimization | **Pre-trained only (frozen)** |
 
 ### Implication
 
-The model **does not abuse the fact that demonstration pairs are given** at test time. Instead, it:
-- Uses only the pre-trained knowledge
-- Relies on the frozen puzzle embedding learned during training
-- Treats evaluation as pure inference (no adaptation)
+This is an **even more significant departure** from the paper than just "no test-time optimization":
 
-This is a **significant simplification** but also demonstrates that the pre-trained model can generalize without test-time optimization, which is interesting from a scientific perspective.
+1. **Demonstration pairs are completely unused** - the model never sees them at test time
+2. **Pure zero-shot inference** - relies entirely on pre-trained puzzle embeddings
+3. **No adaptation whatsoever** - no gradient updates, no fine-tuning, not even seeing the demo pairs
+4. **Test-time augmentation only** - the only test-time technique is running 1000 augmented variants + voting
+
+This makes the results **more impressive** from a generalization standpoint - the model solves puzzles without any test-time examples showing the transformation rule. However, it's a major discrepancy from the paper's described methodology.
 
 ## Brain Correspondence
 
@@ -373,23 +397,30 @@ This emergent property arises during training and correlates with the model's ab
 
 5. **ARC-AGI input structure**:
    - Each puzzle gets a learnable embedding (puzzle_id → embedding vector)
-   - All examples (demonstrations + test inputs) for same puzzle share this embedding
+   - **During training**: Only demonstration pairs used; model learns puzzle embeddings from them
+   - **During evaluation**: Only test inputs used; same puzzle_id retrieves the frozen embedding learned during training
    - Embedding is prepended to grid input: `[puzzle_emb, grid_tokens]`
    - Model learns to use embedding to identify which transformation rule applies
 
 6. **Inference procedure**:
-   - **In paper**: Two-stage (optimize puzzle embedding on demos → freeze → predict on tests)
-   - **In code**: Single-stage (pure inference with frozen pre-trained model)
+   - **In paper**: Two-stage test-time process (optimize puzzle embedding on demos → freeze → predict on tests)
+   - **In code**: Pure zero-shot inference (no test-time optimization, no demonstration pairs)
+   - Model uses puzzle embeddings learned during pre-training (frozen)
+   - Test inputs are run through model with 1000 augmented variants
+   - Predictions are evaluated against ground truth test outputs
    - Augmentation + voting (1000 variants, top 2 majority vote) is implemented
-   - Demonstration pairs are NOT ignored but treated identically to test pairs during evaluation
 
 ### Key Insights
 
 - The model achieves **256 equivalent transformer layers** through recurrence (4×4×16)
 - Uses **two levels** of gradient approximation (inner: cycle-level, outer: segment-level)
-- **Test-time optimization gap**: Code doesn't implement the paper's described test-time learning
-- Model generalizes using only **pre-trained knowledge** without adapting to demonstration pairs at test time
-- This is actually a **stronger result**: shows the model can reason without test-time optimization
+- **Major evaluation discrepancy**: Code completely ignores demonstration pairs at test time
+  - Paper: Two-stage test-time learning (optimize on demos → infer on tests)
+  - Code: Zero-shot inference (frozen embeddings, no demos, only test inputs)
+- **Training vs Evaluation split**:
+  - Training: Only demonstration pairs; learns puzzle embeddings
+  - Evaluation: Only test inputs; uses frozen embeddings from training
+- This is actually a **stronger result**: model solves puzzles without seeing any demonstration pairs at test time
 - **Puzzle embedding architecture**: Uses two separate embedding layers (one for puzzle IDs, one for grid tokens) that are concatenated, rather than a single embedding layer as the paper's wording suggests
 
 ## References
@@ -401,4 +432,4 @@ This emergent property arises during training and correlates with the model's ab
 
 ---
 
-**Last Updated**: 2025-12-01 (based on codebase at commit a9f2279)
+**Last Updated**: 2025-12-02 (based on codebase at commit a9f2279)
